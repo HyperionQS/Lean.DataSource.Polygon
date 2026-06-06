@@ -564,6 +564,12 @@ namespace QuantConnect.Lean.DataSource.Polygon
         /// </summary>
         private static void ValidateSubscription()
         {
+            // When routed at the internal Hyperion gateway we use our own Massive entitlement,
+            // not a QuantConnect data subscription, so skip the QC license validation phone-home.
+            if (!string.IsNullOrEmpty(Config.Get("polygon-ws-base-url")))
+            {
+                return;
+            }
             try
             {
                 const int productId = 306;
