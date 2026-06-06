@@ -19,11 +19,19 @@ using QuantConnect.Lean.Engine.HistoricalData;
 using QuantConnect.Logging;
 using QuantConnect.Util;
 using QuantConnect.Data.Consolidators;
+using QuantConnect.Configuration;
+using System.Collections.Concurrent;
 
 namespace QuantConnect.Lean.DataSource.Polygon
 {
     public partial class PolygonDataProvider : MappedSynchronizingHistoryProvider
     {
+        private const string MassiveHistoryAdjustSource = "massive";
+
+        private static readonly string HistoryAdjustSource = Config.Get("polygon-history-adjust-source");
+
+        private readonly ConcurrentDictionary<string, IReadOnlyList<DividendResult>> _dividendReferenceCache = new();
+
         private int _dataPointCount;
 
         /// <summary>
@@ -166,21 +174,57 @@ namespace QuantConnect.Lean.DataSource.Polygon
             var end = Time.DateTimeToUnixTimeStampMilliseconds(request.EndTimeUtc.RoundDown(resolutionTimeSpan));
             var historyTimespan = GetHistoryTimespan(request.Resolution);
 
+            var massiveDividendAdjusted = IsMassiveDividendAdjusted(request.DataNormalizationMode);
+            var splitAdjusted = massiveDividendAdjusted || request.DataNormalizationMode != DataNormalizationMode.Raw;
+
             var resource = $"v2/aggs/ticker/{ticker}/range/1/{historyTimespan}/{start}/{end}";
             var parameters = new Dictionary<string, string>
             {
-                ["adjusted"] = (request.DataNormalizationMode != DataNormalizationMode.Raw).ToString()
+                ["adjusted"] = splitAdjusted.ToString()
             };
+
+            var dividendReference = massiveDividendAdjusted ? GetDividendReference(ticker) : null;
 
             foreach (var bar in RestApiClient.DownloadAndParseData<AggregatesResponse>(resource, parameters)
                                              .SelectMany(response => response.Results))
             {
                 var utcTime = Time.UnixMillisecondTimeStampToDateTime(bar.Timestamp);
                 var time = GetTickTime(request.Symbol, utcTime);
+                var dividendFactor = dividendReference != null
+                    ? GetDividendAdjustmentFactor(dividendReference, time.Date)
+                    : 1m;
                 Interlocked.Increment(ref _dataPointCount);
-                yield return new TradeBar(time, request.Symbol, bar.Open, bar.High, bar.Low, bar.Close,
+                yield return new TradeBar(time, request.Symbol,
+                    bar.Open * dividendFactor, bar.High * dividendFactor, bar.Low * dividendFactor, bar.Close * dividendFactor,
                     bar.Volume, resolutionTimeSpan);
             }
+        }
+
+        private static bool IsMassiveDividendAdjusted(DataNormalizationMode normalizationMode)
+        {
+            return normalizationMode != DataNormalizationMode.Raw &&
+                HistoryAdjustSource.Equals(MassiveHistoryAdjustSource, StringComparison.InvariantCultureIgnoreCase);
+        }
+
+        private IReadOnlyList<DividendResult> GetDividendReference(string ticker)
+        {
+            return _dividendReferenceCache.GetOrAdd(ticker, FetchDividendReference);
+        }
+
+        private IReadOnlyList<DividendResult> FetchDividendReference(string ticker)
+        {
+            var parameters = new Dictionary<string, string> { ["ticker"] = ticker };
+            return RestApiClient.DownloadAndParseData<DividendsResponse>("stocks/v1/dividends", parameters)
+                .SelectMany(response => response.Results)
+                .Where(dividend => dividend.HistoricalAdjustmentFactor.HasValue)
+                .OrderBy(dividend => dividend.ExDividendDate)
+                .ToList();
+        }
+
+        private static decimal GetDividendAdjustmentFactor(IReadOnlyList<DividendResult> dividendReference, DateTime date)
+        {
+            var nextDividend = dividendReference.FirstOrDefault(dividend => dividend.ExDividendDate.Date > date);
+            return nextDividend?.HistoricalAdjustmentFactor ?? 1m;
         }
 
         /// <summary>
