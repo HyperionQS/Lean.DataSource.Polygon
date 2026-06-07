@@ -51,6 +51,20 @@ namespace QuantConnect.Lean.DataSource.Polygon
             SecurityType.Index,
         });
 
+        /// <summary>
+        /// Supported security types, honoring the 'polygon-enable-index' flag (default false).
+        /// When index is disabled the spot-index path is dropped so an external index provider can
+        /// serve it; IndexOption is unaffected.
+        /// </summary>
+        private static IReadOnlyList<SecurityType> EffectiveSupportedSecurityTypes()
+        {
+            if (Config.GetBool("polygon-enable-index", false))
+            {
+                return _supportedSecurityTypes;
+            }
+            return _supportedSecurityTypes.Where(securityType => securityType != SecurityType.Index).ToList();
+        }
+
         private string _apiKey;
 
         private PolygonAggregationManager _dataAggregator;
@@ -169,7 +183,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
             if (streamingEnabled)
             {
                 _subscriptionManager = new PolygonSubscriptionManager(
-                    _supportedSecurityTypes,
+                    EffectiveSupportedSecurityTypes(),
                     maxSubscriptionsPerWebSocket,
                     (securityType) => new PolygonWebSocketClientWrapper(_apiKey, _symbolMapper, securityType, OnMessage, licenseType));
                 _dataAggregator = new PolygonAggregationManager(_subscriptionManager);
@@ -523,7 +537,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
         /// </summary>
         private static bool IsSecurityTypeSupported(SecurityType securityType)
         {
-            return _supportedSecurityTypes.Contains(securityType);
+            return EffectiveSupportedSecurityTypes().Contains(securityType);
         }
 
         /// <summary>
